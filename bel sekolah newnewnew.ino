@@ -37,6 +37,7 @@ const char* daysOfWeek[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 bool relayActive[7][15] = {false}; // Status apakah relay sudah aktif pada waktu tertentu
 unsigned long relayDuration = 3000; // 3 detik
 unsigned long lastRTCUpdate = 0; // Waktu update RTC terakhir
+unsigned long relayStartMillis[7][15] = {0}; // Menyimpan waktu mulai aktif relay
 
 ESP8266WebServer server(80);
 
@@ -146,7 +147,16 @@ bool connectToWiFi() {
 
 void handleRoot() {
   String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Scheduler</title>"
-    "<style>body { font-family: Arial, sans-serif; }</style></head><body><h1>Scheduler</h1>"
+    "<style>"
+    "body { font-family: Arial, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; }"
+    "header { background-color: #4CAF50; color: #fff; width: 100%; padding: 20px; text-align: center; }"
+    "main { width: 90%; max-width: 800px; margin: 20px 0; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }"
+    "h1 { margin-top: 0; }"
+    "a { color: #4CAF50; text-decoration: none; font-weight: bold; }"
+    "a:hover { text-decoration: underline; }"
+    "</style></head><body>"
+    "<header><h1>Scheduler</h1></header>"
+    "<main>"
     "<form action='/set_time' method='post'>"
     "<h2>Simpan Jadwal</h2>"
     "<label>Hari: <select name='day'>";
@@ -165,7 +175,7 @@ void handleRoot() {
           "</form>"
           "<h2>Lihat Jadwal</h2>"
           "<a href='/view_schedules'>Lihat Jadwal yang Disimpan</a>"
-          "</body></html>";
+          "</main></body></html>";
   
   server.send(200, "text/html", html);
 }
@@ -198,57 +208,121 @@ void handleSetTime() {
 
         // Tampilkan pesan sukses dalam HTML
         String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Jadwal Disimpan</title>"
-                      "<style>body { font-family: Arial, sans-serif; text-align: center; padding: 20px; }</style></head><body>"
-                      "<h1>Jadwal disimpan</h1>"
-                      "<p>Jadwal untuk " + day + " pada " + time + " berhasil disimpan.</p>"
-                      "<a href='/'>Kembali ke Beranda</a>"
+                      "<style>"
+                      "body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background-color: #f4f4f9; color: #333; }"
+                      "a { color: #4CAF50; text-decoration: none; font-weight: bold; }"
+                      "a:hover { text-decoration: underline; }"
+                      "</style></head><body>"
+                      "<h1>Jadwal Berhasil Disimpan</h1>"
+                      "<p><a href='/'>Kembali ke Halaman Utama</a></p>"
                       "</body></html>";
-
         server.send(200, "text/html", html);
       } else {
-        server.send(400, "text/plain", "Tidak ada slot tersedia");
+        server.send(500, "text/html", "Tidak dapat menyimpan jadwal baru.");
       }
     } else {
-      server.send(400, "text/plain", "Hari tidak valid");
+      server.send(400, "text/html", "Hari tidak valid.");
     }
   } else {
-    server.send(400, "text/plain", "Parameter tidak lengkap");
+    server.send(400, "text/html", "Data tidak lengkap.");
   }
 }
 
 void handleViewSchedules() {
-  String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Lihat Jadwal</title>"
-    "<style>body { font-family: Arial, sans-serif; } table { width: 100%; border-collapse: collapse; } th, td { border: 1px solid #ddd; padding: 8px; } th { background-color: #f4f4f4; }</style>"
-    "</head><body><h1>Jadwal yang Disimpan</h1>";
+  String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Jadwal</title>"
+    "<style>"
+    "body { font-family: Arial, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; }"
+    "header { background-color: #4CAF50; color: #fff; width: 100%; padding: 20px; text-align: center; }"
+    "main { width: 90%; max-width: 800px; margin: 20px 0; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }"
+    "h1 { margin-top: 0; }"
+    "</style></head><body>"
+    "<header><h1>Jadwal</h1></header>"
+    "<main>";
   
-  for (int day = 0; day < 7; day++) {
-    html += "<h2>" + String(daysOfWeek[day]) + "</h2>";
-    html += "<table><tr><th>Jam</th><th>Menit</th><th>Status</th></tr>";
-    
-    for (int i = 0; i < 15; i++) {
-      if (schedules[day][i].enabled) {
-        html += "<tr><td>" + String(schedules[day][i].hour) + "</td><td>" + String(schedules[day][i].minute) + "</td><td>Enabled</td></tr>";
+  for (int i = 0; i < 7; i++) {
+    html += "<h2>" + String(daysOfWeek[i]) + "</h2><ul>";
+    for (int j = 0; j < 15; j++) {
+      if (schedules[i][j].enabled) {
+        html += "<li>" + String(schedules[i][j].hour) + ":" + String(schedules[i][j].minute) + "</li>";
       }
     }
-    html += "</table>";
+    html += "</ul>";
   }
-  
-  html += "<br><a href='/'>Kembali ke Beranda</a></body></html>";
-  server.send(200, "text/html", html);
-}
 
 void handleUpdateSchedule() {
-  // Placeholder untuk mengupdate jadwal jika diperlukan
+  // Implementasikan pembaruan jadwal di sini jika diperlukan
 }
 
 void handleClearSchedules() {
-  for (int day = 0; day < 7; day++) {
-    for (int i = 0; i < 15; i++) {
-      schedules[day][i].enabled = false;
+  for (int i = 0; i < 7; i++) {
+    for (int j = 0; j < 15; j++) {
+      schedules[i][j].enabled = false;
     }
   }
   saveSchedules();
-  server.send(200, "text/plain", "Semua jadwal dihapus");
+  blinkLED(3);
+
+  // Tampilkan pesan sukses dalam HTML
+  String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Jadwal Dihapus</title>"
+                "<style>"
+                "body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background-color: #f4f4f9; color: #333; }"
+                "a { color: #4CAF50; text-decoration: none; font-weight: bold; }"
+                "a:hover { text-decoration: underline; }"
+                "</style></head><body>"
+                "<h1>Semua Jadwal Berhasil Dihapus</h1>"
+                "<p><a href='/'>Kembali ke Halaman Utama</a></p>"
+                "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+void saveSchedules() {
+  int address = 0;
+  for (int i = 0; i < 7; i++) {
+    for (int j = 0; j < 15; j++) {
+      EEPROM.write(address++, schedules[i][j].enabled ? 1 : 0);
+      EEPROM.write(address++, schedules[i][j].hour);
+      EEPROM.write(address++, schedules[i][j].minute);
+    }
+  }
+  EEPROM.commit();
+}
+
+void loadSchedules() {
+  int address = 0;
+  for (int i = 0; i < 7; i++) {
+    for (int j = 0; j < 15; j++) {
+      schedules[i][j].enabled = EEPROM.read(address++) == 1;
+      schedules[i][j].hour = EEPROM.read(address++);
+      schedules[i][j].minute = EEPROM.read(address++);
+    }
+  }
+}
+
+void resetDailySchedules() {
+  for (int i = 0; i < 7; i++) {
+    for (int j = 0; j < 15; j++) {
+      relayActive[i][j] = false;
+    }
+  }
+}
+
+void checkSchedules(DateTime now) {
+  int dayIndex = now.dayOfTheWeek();
+  for (int i = 0; i < 15; i++) {
+    if (schedules[dayIndex][i].enabled &&
+        schedules[dayIndex][i].hour == now.hour() &&
+        schedules[dayIndex][i].minute == now.minute()) {
+      digitalWrite(relayPin, HIGH);
+      relayStartMillis[dayIndex][i] = millis();
+      relayActive[dayIndex][i] = true;
+    }
+
+    // Matikan relay setelah 3 detik
+    if (relayActive[dayIndex][i] && millis() - relayStartMillis[dayIndex][i] >= relayDuration) {
+      digitalWrite(relayPin, LOW);
+      relayActive[dayIndex][i] = false;
+    }
+  }
 }
 
 int getDayIndex(String day) {
@@ -260,59 +334,11 @@ int getDayIndex(String day) {
   return -1;
 }
 
-void saveSchedules() {
-  int addr = 0;
-  for (int day = 0; day < 7; day++) {
-    for (int i = 0; i < 15; i++) {
-      EEPROM.write(addr++, schedules[day][i].enabled);
-      EEPROM.write(addr++, schedules[day][i].hour);
-      EEPROM.write(addr++, schedules[day][i].minute);
-    }
-  }
-  EEPROM.commit();
-}
-
-void loadSchedules() {
-  int addr = 0;
-  for (int day = 0; day < 7; day++) {
-    for (int i = 0; i < 15; i++) {
-      schedules[day][i].enabled = EEPROM.read(addr++);
-      schedules[day][i].hour = EEPROM.read(addr++);
-      schedules[day][i].minute = EEPROM.read(addr++);
-    }
-  }
-}
-
-void checkSchedules(DateTime now) {
-  int dayIndex = now.dayOfTheWeek();
-  for (int i = 0; i < 15; i++) {
-    if (schedules[dayIndex][i].enabled && 
-        now.hour() == schedules[dayIndex][i].hour && 
-        now.minute() == schedules[dayIndex][i].minute && 
-        !relayActive[dayIndex][i]) {
-      
-      digitalWrite(relayPin, HIGH);
-      delay(relayDuration); // Relay aktif selama 3 detik
-      digitalWrite(relayPin, LOW);
-      relayActive[dayIndex][i] = true; // Tandai bahwa relay telah diaktifkan
-    }
-  }
-}
-
-void resetDailySchedules() {
-  for (int day = 0; day < 7; day++) {
-    for (int i = 0; i < 15; i++) {
-      relayActive[day][i] = false; // Reset status relayActive
-    }
-  }
-}
-
 void blinkLED(int times) {
   for (int i = 0; i < times; i++) {
-    digitalWrite(ledPin, LOW);
-    delay(200);
     digitalWrite(ledPin, HIGH);
-    delay(200);
+    delay(100);
+    digitalWrite(ledPin, LOW);
+    delay(100);
   }
-  digitalWrite(ledPin, LOW);
 }
