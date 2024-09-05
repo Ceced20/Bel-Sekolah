@@ -1,0 +1,493 @@
+#include <Wire.h>
+#include <RTClib.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <EEPROM.h>
+#include <LiquidCrystal_I2C.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+
+// Inisialisasi RTC, LCD, dan NTP Client
+RTC_DS3231 rtc;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600, 86400000);  // GMT+7, update sekali sehari
+
+// Pengaturan WiFi
+const char* apSSID = "ESP8266-AP";
+const char* apPassword = "123456789";
+// const char* ssid = "STALOYSIUS_BN_WIFI";
+// const char* password = "Aloysius2030";
+const char* ssid = "Ethan Deco";
+const char* password = "Yroedi75";
+
+// Pengaturan pin relay dan LED
+int relayPin = D5;                        // Pin untuk relay
+int ledPin = LED_BUILTIN;                 // LED internal ESP8266
+const unsigned long blinkInterval = 500;  // Durasi kedipan LED dalam milidetik
+unsigned long previousMillis = 0;         // Waktu terakhir LED berkedip
+bool ledState = LOW;                      // Status LED saat ini
+bool wifi_state = false;
+
+// Struktur untuk menyimpan jadwal
+struct Schedule {
+  bool enabled;
+  bool tipes3;
+  int hour;
+  int minute;
+};
+
+Schedule schedules[7][15];  // 7 hari, 15 jadwal per hari
+const char* daysOfWeek[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+
+// Variabel untuk manajemen waktu relay
+bool relayActive[7][15] = { false };           // Status apakah relay sudah aktif pada waktu tertentu
+unsigned long relayDuration = 3000;            // 3 detik
+unsigned long relayStartTimes[7][15] = { 0 };  // Array untuk menyimpan waktu saat relay diaktifkan
+unsigned long wifi_ret = 0;                    // wifi retry jika tidak baik
+ESP8266WebServer server(80);
+
+void setup() {
+  Serial.begin(9600);
+  EEPROM.begin(512);
+
+  // Inisialisasi RTC
+  if (!rtc.begin()) {
+    Serial.println("RTC tidak ditemukan");
+    while (1)
+      ;
+  }
+
+  // Inisialisasi LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Loading.");
+
+  // Inisialisasi pin relay dan LED
+  pinMode(relayPin, OUTPUT);
+  digitalWrite(relayPin, LOW);
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW);
+
+  wifi_state = false;
+
+  // Koneksi ke WiFi
+  if (!connectToWiFi()) {
+    Serial.println("Koneksi WiFi gagal. Memulai Access Point...");
+    WiFi.softAP(apSSID, apPassword);
+    Serial.print("AP IP address: ");
+    Serial.println(WiFi.softAPIP());
+    wifi_ret = millis();
+  } else {
+    wifi_state = true;
+    Serial.println("Terhubung ke WiFi");
+    // Mulai NTP client dan update RTC
+    timeClient.begin();
+    updateRTC();
+    lcd.setCursor(0, 0);
+    lcd.print("IP:       ");
+    lcd.setCursor(0, 1);
+    lcd.print(WiFi.localIP());
+    delay(7000);
+    lcd.clear();
+  }
+  // Inisialisasi web server
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/set_time", HTTP_POST, handleSetTime);
+  server.on("/view_schedules", HTTP_GET, handleViewSchedules);
+  server.on("/update_schedule", HTTP_POST, handleUpdateSchedule);
+  server.on("/clear_schedules", HTTP_POST, handleClearSchedules);
+  server.begin();
+  Serial.println("HTTP server dimulai");
+
+  // Muat jadwal dari EEPROM
+  loadSchedules();
+}
+
+void loop() {
+  timeClient.update();
+  DateTime now = rtc.now();
+
+  // Reset jadwal harian pada pukul 00:00
+  if (now.hour() == 0 && now.minute() == 0 && now.second() == 0) {
+    resetDailySchedules();
+  }
+
+  // Tampilkan waktu dan tanggal pada LCD
+  lcd.setCursor(0, 0);
+  lcd.printf("%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+  lcd.setCursor(0, 1);
+  lcd.printf("%s %02d/%02d/%04d", daysOfWeek[now.dayOfTheWeek()], now.day(), now.month(), now.year());
+
+  // Periksa apakah ada jadwal yang perlu dieksekusi
+  checkSchedules(now);
+
+  // Tangani request HTTP
+  server.handleClient();
+  if (WiFi.status() != WL_CONNECTED) {
+    wifi_state = false;
+  }
+  if (millis() - wifi_ret > 5 * 60 * 1000 && wifi_state == false) {
+    WiFi.softAPdisconnect(true);
+    if (!connectToWiFi()) {
+      Serial.println("Koneksi WiFi gagal. Memulai Access Point...");
+      WiFi.softAP(apSSID, apPassword);
+      Serial.print("AP IP address: ");
+      Serial.println(WiFi.softAPIP());
+      wifi_ret = millis();
+    } else {
+      wifi_state = true;
+      Serial.println("Terhubung ke WiFi");
+      // Mulai NTP client dan update RTC
+      timeClient.begin();
+      updateRTC();
+    }
+  }
+}
+
+void updateRTC() {
+  timeClient.update();
+  rtc.adjust(DateTime(timeClient.getEpochTime()));
+}
+
+bool connectToWiFi() {
+  WiFi.begin(ssid, password);
+  int attempt = 0;
+  while (WiFi.status() != WL_CONNECTED && attempt < 30) {
+    delay(500);
+    Serial.print(".");
+    attempt++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nTerhubung ke WiFi");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    return true;
+  } else {
+    return false;
+  }
+}
+
+void handleRoot() {
+  String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Scheduler</title>"
+                "<style>"
+                "body { font-family: Arial, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; }"
+                "header { background-color: #4CAF50; color: #fff; width: 100%; padding: 20px; text-align: center; }"
+                "main { width: 90%; max-width: 800px; margin: 20px 0; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }"
+                "h1 { margin-top: 0; }"
+                "a { color: #4CAF50; text-decoration: none; font-weight: bold; }"
+                "a:hover { text-decoration: underline; }"
+                "</style></head><body>"
+                "<header><h1>Scheduler</h1></header>"
+                "<main>"
+                "<form action='/set_time' method='post'>"
+                "<h2>Simpan Jadwal</h2>"
+                "<label>Hari: <select name='day'>";
+
+  for (int i = 0; i < 7; i++) {
+    html += "<option value='" + String(daysOfWeek[i]) + "'>" + String(daysOfWeek[i]) + "</option>";
+  }
+  html += "</select></label><br>"
+          "<label>Waktu: <input type='time' name='time'></label><br>"
+          "<label>Enabled: <input type='checkbox' name='enabled'></label><br>"
+          "<input type='submit' value='Simpan Jadwal'>"
+          "</form>"
+          "<form action='/clear_schedules' method='post'>"
+          "<h2>Hapus Semua Jadwal</h2>"
+          "<input type='submit' value='Hapus Jadwal'>"
+          "</form>"
+          "<h2>Lihat Jadwal</h2>"
+          "<a href='/view_schedules'>Lihat Jadwal yang Disimpan</a>"
+          "</main></body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+void handleSetTime() {
+  if (server.hasArg("day") && server.hasArg("time")) {
+    String day = server.arg("day");
+    String time = server.arg("time");
+    bool enabled = server.hasArg("enabled");
+    bool tipes3 = server.hasArg("type3");
+
+    int dayIndex = getDayIndex(day);
+    if (dayIndex >= 0) {
+      int hour = time.substring(0, 2).toInt();
+      int minute = time.substring(3, 5).toInt();
+      bool saved = false;
+
+      for (int i = 0; i < 15; i++) {
+        if (!schedules[dayIndex][i].enabled) {
+          schedules[dayIndex][i].enabled = enabled;
+          schedules[dayIndex][i].hour = hour;
+          schedules[dayIndex][i].minute = minute;
+          schedules[dayIndex][i].tipes3 = tipes3;
+          saved = true;
+          break;
+        }
+      }
+
+      if (saved) {
+        saveSchedules();
+        blinkLED(2);
+
+        // Tampilkan pesan sukses dalam HTML
+        String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Jadwal Disimpan</title>"
+                      "<style>"
+                      "body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background-color: #f4f4f9; color: #333; }"
+                      "a { color: #4CAF50; text-decoration: none; font-weight: bold; }"
+                      "a:hover { text-decoration: underline; }"
+                      "</style></head><body>"
+                      "<h1>Jadwal Berhasil Disimpan</h1>"
+                      "<a href='/'>Kembali ke Halaman Utama</a>"
+                      "</body></html>";
+        server.send(200, "text/html", html);
+        return;
+      }
+    }
+  }
+
+  server.send(400, "text/html", "Terjadi kesalahan saat menyimpan jadwal.");
+}
+
+void handleViewSchedules() {
+  String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Lihat Jadwal</title>"
+                "<style>"
+                "body { font-family: Arial, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; }"
+                "header { background-color: #4CAF50; color: #fff; width: 100%; padding: 20px; text-align: center; }"
+                "main { width: 90%; max-width: 800px; margin: 20px 0; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }"
+                "table { width: 100%; border-collapse: collapse; }"
+                "th, td { border: 1px solid #ddd; padding: 8px; }"
+                "th { background-color: #f4f4f4; }"
+                "a { color: #4CAF50; text-decoration: none; font-weight: bold; }"
+                "a:hover { text-decoration: underline; }"
+                "</style></head><body>"
+                "<header><h1>Jadwal yang Disimpan</h1></header>"
+                "<main>";
+
+  for (int i = 0; i < 7; i++) {
+    html += "<h2>" + String(daysOfWeek[i]) + "</h2>"
+                                             "<form action='/update_schedule' method='post'>"
+                                             "<table><tr><th>Hour</th><th>Minute</th><th>Enabled</th><th>Bunyi 3x</th></tr>";
+    for (int j = 0; j < 15; j++) {
+      html += "<tr>"
+              "<td>"
+              + String(schedules[i][j].hour) + "</td>"
+                                               "<td>"
+              + String(schedules[i][j].minute) + "</td>"
+                                                 "<td><input type='checkbox' name='schedule_"
+              + String(i) + "_" + String(j) + "'";
+      if (schedules[i][j].enabled) html += " checked";
+      html += "></td>"
+              "<td><input type='checkbox' name='type3_"
+
+              + String(i) + "_" + String(j) + "'";
+      if (schedules[i][j].tipes3) html += " checked";
+      html += "></td>"
+              "</tr>";
+    }
+    html += "</table>"
+            "<input type='hidden' name='dayIndex' value='"
+            + String(i) + "'>"
+                          "<input type='submit' value='Simpan Perubahan'>"
+                          "</form>";
+  }
+  html += "<a href='/'>Kembali ke Beranda</a>"
+          "</main></body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+void handleUpdateSchedule() {
+  // Fungsionalitas ini bisa ditambahkan jika diperlukan
+    if (server.hasArg("dayIndex")) {
+    int dayIndex = server.arg("dayIndex").toInt();
+    if (dayIndex >= 0 && dayIndex < 7) {
+      for (int j = 0; j < 15; j++) {
+        String key = "schedule_" + String(dayIndex) + "_" + String(j);
+        String key2 = "type3_" + String(dayIndex) + "_" + String(j);
+        bool enabled = server.hasArg(key);
+        bool type3 = server.hasArg(key2);
+        schedules[dayIndex][j].enabled = enabled;
+        schedules[dayIndex][j].tipes3 = type3;
+      }
+      saveSchedules();
+      
+      // Ubah response menjadi tampilan HTML
+      String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Jadwal Diperbarui</title>"
+                    "<style>"
+                    "body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background-color: #f4f4f9; color: #333; }"
+                    "a { color: #4CAF50; text-decoration: none; font-weight: bold; }"
+                    "a:hover { text-decoration: underline; }"
+                    "</style></head><body>"
+                    "<h1>Jadwal diperbarui</h1>"
+                    "<p>Jadwal berhasil diperbarui.</p>"
+                    "<a href='/'>Kembali ke Beranda</a>"
+                    "</body></html>";
+      
+      server.send(200, "text/html", html);
+    } else {
+      server.send(400, "text/plain", "Indeks hari tidak valid");
+    }
+  } else {
+    server.send(400, "text/plain", "Parameter tidak lengkap");
+  }
+}
+
+void handleClearSchedules() {
+  // Hapus semua jadwal dari array
+  for (int day = 0; day < 7; day++) {
+    for (int i = 0; i < 15; i++) {
+      schedules[day][i].enabled = false;
+      schedules[day][i].hour = 0;
+      schedules[day][i].minute = 0;
+    }
+  }
+
+  // Hapus semua jadwal dari EEPROM
+  clearEEPROM();
+
+  // Tampilkan pesan keberhasilan kepada pengguna
+  blinkLED(2);  // Berkedip LED untuk menunjukkan bahwa operasi berhasil
+  String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Jadwal Dihapus</title>"
+                "<style>body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background-color: #f4f4f9; color: #333; }"
+                "a { color: #4CAF50; text-decoration: none; font-weight: bold; }"
+                "a:hover { text-decoration: underline; }</style></head><body>"
+                "<h1>Semua Jadwal Telah Dihapus</h1>"
+                "<a href='/'>Kembali ke Halaman Utama</a>"
+                "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+void clearEEPROM() {
+  for (int i = 0; i < 512; i++) {  // Menggunakan ukuran EEPROM yang sesuai
+    EEPROM.write(i, 0);            // Menulis 0 ke setiap byte di EEPROM
+  }
+  EEPROM.commit();  // Menyimpan perubahan
+}
+
+
+void checkSchedules(DateTime now) {
+  int day = now.dayOfTheWeek();  // Ambil hari saat ini (0 = Minggu, 1 = Senin, dst.)
+  
+  for (int i = 0; i < 15; i++) {
+    // Cek apakah jadwal diaktifkan, waktu sesuai, dan relay belum aktif
+    if (schedules[day][i].enabled && 
+        schedules[day][i].hour == now.hour() && 
+        schedules[day][i].minute == now.minute() && 
+        now.second() == 0) {
+      
+      if (!relayActive[day][i]) {
+        relayActive[day][i] = true;  // Tandai relay sebagai aktif
+        relayStartTimes[day][i] = millis();  // Catat waktu mulai relay
+        
+        Serial.println("Relay aktif pada hari ini");
+        digitalWrite(relayPin, HIGH);  // Nyalakan relay
+
+        // Cek tipe relay (apakah 3x lonceng atau sekali)
+        if (schedules[day][i].tipes3) {
+          // Lonceng 3 kali dengan interval 1 detik
+          delay(1000);
+          digitalWrite(relayPin, LOW);
+          delay(500);
+          digitalWrite(relayPin, HIGH);
+          delay(1000);
+          digitalWrite(relayPin, LOW);
+          delay(500);
+          digitalWrite(relayPin, HIGH);
+          delay(1000);
+          digitalWrite(relayPin, LOW);
+        } else {
+          // Lonceng sekali selama 3 detik
+          delay(3000);
+          digitalWrite(relayPin, LOW);
+        }
+      }
+    }
+  }
+}
+
+/*
+  // Matikan relay jika sudah aktif selama 3 detik
+  for (int day = 0; day < 7; day++) {
+    for (int i = 0; i < 15; i++) {
+      if (relayActive[day][i]) {
+        unsigned long currentMillis = millis();
+        if (currentMillis - relayStartTimes[day][i] >= relayDuration) {
+          relayActive[day][i] = false;
+          Serial.println("relay mati");
+          digitalWrite(relayPin, LOW);  // Matikan relay
+        } else {
+          // Berkedip LED internal jika relay aktif
+          if ((currentMillis / blinkInterval) % 2 == 0) {
+            digitalWrite(ledPin, HIGH);
+          } else {
+            digitalWrite(ledPin, LOW);
+          }
+        }
+      }
+    }
+  }
+  */
+
+
+
+
+void resetDailySchedules() {
+  for (int day = 0; day < 7; day++) {
+    for (int i = 0; i < 15; i++) {
+      if (relayActive[day][i]) {
+        relayActive[day][i] = false;
+        digitalWrite(relayPin, LOW);
+      }
+    }
+  }
+  // Matikan LED setelah reset jadwal harian
+  digitalWrite(ledPin, LOW);
+}
+
+int getDayIndex(String day) {
+  for (int i = 0; i < 7; i++) {
+    if (day.equals(daysOfWeek[i])) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+
+void blinkLED(int times) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(ledPin, HIGH);
+    delay(blinkInterval);
+    digitalWrite(ledPin, LOW);
+    delay(blinkInterval);
+  }
+}
+
+void saveSchedules() {
+  int address = 0;
+  for (int day = 0; day < 7; day++) {
+    for (int i = 0; i < 15; i++) {
+      EEPROM.write(address++, schedules[day][i].enabled);
+      EEPROM.write(address++, schedules[day][i].hour);
+      EEPROM.write(address++, schedules[day][i].minute);
+      EEPROM.write(address++, schedules[day][i].tipes3);
+    }
+  }
+  EEPROM.commit();
+}
+
+void loadSchedules() {
+  int address = 0;
+  for (int day = 0; day < 7; day++) {
+    for (int i = 0; i < 15; i++) {
+      schedules[day][i].enabled = EEPROM.read(address++);
+      schedules[day][i].hour = EEPROM.read(address++);
+      schedules[day][i].minute = EEPROM.read(address++);
+      schedules[day][i].tipes3 = EEPROM.read(address++);
+    }
+  }
+}
